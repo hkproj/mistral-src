@@ -34,16 +34,22 @@ def sample(logits: torch.Tensor, temperature: float, top_p: float):
 @torch.inference_mode()
 def generate(prompts: List[str], model: Transformer, tokenizer: Tokenizer, *, max_tokens: int,  temperature: float, chunk_size: int = None):
     model = model.eval()
-    B, V = len(prompts), model.args.vocab_size
+    batch_size, vocabulary_size = len(prompts), model.args.vocab_size # Batch_Size, Vocabulary_Size
 
     # Tokenize
     encoded_prompts = [tokenizer.encode(prompt, bos=True) for prompt in prompts]
-    seqlens = [len(x) for x in encoded_prompts]
+    # Indicates the number of tokens in each prompt
+    prompts_sequence_lengths = [len(x) for x in encoded_prompts]
 
     # Cache
-    cache_window = max(seqlens) + max_tokens
-    if model.args.sliding_window is not None and cache_window > model.args.sliding_window:
-        cache_window = model.args.sliding_window
+    # Indicates the size of the rotating cache
+    cache_window = max(prompts_sequence_lengths) + max_tokens
+
+    # If the cache window is larger than the sliding window, the cache window is set to the sliding window
+    if model.args.sliding_window is not None and cache_window > model.args.sliding_window: 
+        cache_window = model.args.sliding_window 
+    
+    # Create the cache
     cache = RotatingBufferCache(
         model.n_local_layers,
         model.args.max_batch_size,
@@ -51,15 +57,16 @@ def generate(prompts: List[str], model: Transformer, tokenizer: Tokenizer, *, ma
         model.args.n_kv_heads,
         model.args.head_dim,
     )
+
     cache.to(device=model.device, dtype=model.dtype)
     cache.reset()
     
     # Bookkeeping
-    logprobs = [[] for _ in range(B)]
+    logprobs = [[] for _ in range(batch_size)]
     last_token_prelogits = None
 
     # One chunk if size not specified
-    max_prompt_len = max(seqlens)
+    max_prompt_len = max(prompts_sequence_lengths)
     if chunk_size is None:
         chunk_size = max_prompt_len
 
@@ -77,7 +84,7 @@ def generate(prompts: List[str], model: Transformer, tokenizer: Tokenizer, *, ma
         if last_token_prelogits is not None:
             # Pass > 1
             last_token_logits = torch.log_softmax(last_token_prelogits, dim=-1)
-            for i_seq in range(B):
+            for i_seq in range(batch_size):
                 logprobs[i_seq].append(last_token_logits[i_seq, prompt_chunks[i_seq][0]].item())
 
         offset = 0
@@ -86,7 +93,7 @@ def generate(prompts: List[str], model: Transformer, tokenizer: Tokenizer, *, ma
             offset += len(sequence)
 
         last_token_prelogits = prelogits.index_select(0, torch.tensor([len(p) for p in prompt_chunks], device=prelogits.device).cumsum(dim=0) - 1)
-        assert last_token_prelogits.shape == (B, V)
+        assert last_token_prelogits.shape == (batch_size, vocabulary_size)
 
     # decode
     generated_tokens = []
@@ -95,12 +102,12 @@ def generate(prompts: List[str], model: Transformer, tokenizer: Tokenizer, *, ma
         next_token = sample(last_token_prelogits, temperature=temperature, top_p=0.8)
 
         last_token_logits = torch.log_softmax(last_token_prelogits, dim=-1)
-        for i in range(B):
+        for i in range(batch_size):
             logprobs[i].append(last_token_logits[i, next_token[i]].item())
 
         generated_tokens.append(next_token[:, None])
         last_token_prelogits = model.forward(next_token, seqlens=[1] * len(prompts), cache=cache)
-        assert last_token_prelogits.shape == (B, V)
+        assert last_token_prelogits.shape == (batch_size, vocabulary_size)
 
     generated_words = []
     if generated_tokens:
@@ -146,14 +153,15 @@ def demo(
 
     res, _logprobs = generate(
         [
-            "This is a test",
-            "This is another great test",
-            "This is a third test, mistral AI is very good at testing. ",
+            "This is a test made by me with the help of an AI assistant. I also like to play with videogames. Can you recommend me one game to play with?",
+            # "This is another great test",
+            # "This is a third test, mistral AI is very good at testing. ",
         ],
         transformer,
         tokenizer,
         max_tokens=max_tokens,
         temperature=temperature,
+        chunk_size=10,
     )
     if should_print:
         for x,l in zip(res, _logprobs):
