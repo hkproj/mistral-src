@@ -83,11 +83,11 @@ class Attention(nn.Module):
     ) -> torch.Tensor:
         seqlen_sum, _ = x.shape
 
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
-        xq = xq.view(seqlen_sum, self.n_heads, self.head_dim)
-        xk = xk.view(seqlen_sum, self.n_kv_heads, self.head_dim)
-        xv = xv.view(seqlen_sum, self.n_kv_heads, self.head_dim)
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x) # (Seq, Dim) --> (Seq, Dim)
+        xq = xq.view(seqlen_sum, self.n_heads, self.head_dim) # (Seq, Dim) --> (Seq, N_Heads, Head_Dim)
+        xk = xk.view(seqlen_sum, self.n_kv_heads, self.head_dim) # (Seq, Dim) --> (Seq, N_Heads_KV, Head_Dim)
+        xv = xv.view(seqlen_sum, self.n_kv_heads, self.head_dim) # (Seq, Dim) --> (Seq, N_Heads_KV, Head_Dim)
+        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis) # (Seq, N_Heads, Head_Dim), (Seq, N_Heads_KV, Head_Dim)
 
         if cache is None:
             key, val = xk, xv
@@ -202,6 +202,7 @@ class Transformer(nn.Module):
         num_layers_per_rank = math.ceil(self.n_layers / self.num_pipeline_ranks)
         offset = self.pipeline_rank * num_layers_per_rank
         end = min(self.n_layers, offset + num_layers_per_rank)
+        # A dictionary that defines which layers are present in the current rank
         self.layers = nn.ModuleDict({str(i): layers[i] for i in range(offset, end)})
         self.n_local_layers = len(self.layers)
 
