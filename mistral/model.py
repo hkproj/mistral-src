@@ -50,10 +50,10 @@ class SimpleInputMetadata:
             )
         )
 
-
+# repeat_intrleave repeats the given dimension like this: x = torch.tensor([1, 2, 3]) --> torch.repeat_interleave(x, repeats=2, dim=0) --> torch.tensor([1, 1, 2, 2, 3, 3])
 def repeat_kv(keys: torch.Tensor, values: torch.Tensor, repeats: int, dim: int):
-    keys = torch.repeat_interleave(keys, repeats=repeats, dim=dim)
-    values = torch.repeat_interleave(values, repeats=repeats, dim=dim)
+    keys = torch.repeat_interleave(keys, repeats=repeats, dim=dim) # (Seq, N_Heads_KV, Head_Dim) --> (Seq, N_Heads, Head_Dim)
+    values = torch.repeat_interleave(values, repeats=repeats, dim=dim) # (Seq, N_Heads_KV, Head_Dim) --> (Seq, N_Heads, Head_Dim)
     return keys, values
 
 
@@ -81,7 +81,7 @@ class Attention(nn.Module):
         freqs_cis: torch.Tensor,
         cache: Optional[CacheView],
     ) -> torch.Tensor:
-        seqlen_sum, _ = x.shape
+        seqlen_sum, _ = x.shape # (Seq, Dim)
 
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x) # (Seq, Dim) --> (Seq, Dim)
         xq = xq.view(seqlen_sum, self.n_heads, self.head_dim) # (Seq, Dim) --> (Seq, N_Heads, Head_Dim)
@@ -92,11 +92,11 @@ class Attention(nn.Module):
         if cache is None:
             key, val = xk, xv
         elif cache.prefill:
-            key, val = cache.interleave_kv(xk, xv)
-            cache.update(xk, xv)
+            key, val = cache.interleave_kv(xk, xv) # Appends the incoming keys and values to the currently cached keys and values (because we need to use them for attention)
+            cache.update(xk, xv) # Add the incoming keys and values to the cache in the positions indicated by metadata.cache_positions 
         else:
             cache.update(xk, xv)
-            key, val = cache.key, cache.value
+            key, val = cache.key, cache.value # Retrieve the cached keys and values (including the newly added ones)
             key = key.view(
                 seqlen_sum * cache.sliding_window, self.n_kv_heads, self.head_dim
             )
@@ -111,8 +111,8 @@ class Attention(nn.Module):
         xq, key, val = xq[None, ...], key[None, ...], val[None, ...]
         output = memory_efficient_attention(
             xq, key, val, None if cache is None else cache.mask
-        )
-
+        ) # Output: (B=1, Seq, N_Heads, Head_Dim)
+        # (B=1, Seq, N_Heads, Head_Dim) --> (Seq, N_Heads * Head_Dim) --> (Seq, Dim)
         return self.wo(output.view(seqlen_sum, self.n_heads * self.head_dim))
 
 
@@ -236,8 +236,8 @@ class Transformer(nn.Module):
 
     def forward_partial(
         self,
-        input_ids: torch.Tensor,
-        seqlens: List[int],
+        input_ids: torch.Tensor, # The concatenated tokens of the batch
+        seqlens: List[int], # The sequence length of each input in the batch (so we can understand which token belongs to which prompt)
         cache: Optional[RotatingBufferCache] = None,
     ) -> torch.Tensor:
         """Local forward pass.
@@ -257,7 +257,7 @@ class Transformer(nn.Module):
 
         if self.pipeline_rank == 0:
             assert self.tok_embeddings is not None
-            h = self.tok_embeddings(input_ids)
+            h = self.tok_embeddings(input_ids) # Transform the tokens into embeddings
         else:
             h = torch.empty(
                 num_toks, self.args.dim, device=self.device, dtype=self.dtype
@@ -269,13 +269,13 @@ class Transformer(nn.Module):
         for local_layer_id, layer in enumerate(self.layers.values()):
             if cache is not None:
                 assert input_metadata is not None
-                cache_view = cache.get_view(local_layer_id, input_metadata)
+                cache_view = cache.get_view(local_layer_id, input_metadata) # Retrieves the KV cache for the current layer
             else:
                 cache_view = None
             h = layer(h, freqs_cis, cache_view)
 
         if cache is not None:
-            cache.update_seqlens(seqlens)
+            cache.update_seqlens(seqlens) # Updates the total sequence length so far seen by the cache among all the iterations
         if self.pipeline_rank < self.num_pipeline_ranks - 1:
             torch.distributed.send(h, dst=self.pipeline_rank + 1)
             return h
@@ -286,8 +286,8 @@ class Transformer(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
-        seqlens: List[int],
+        input_ids: torch.Tensor, # The concatenated tokens of the batch
+        seqlens: List[int], # The sequence length of each input in the batch (so we can understand which token belongs to which prompt)
         cache: Optional[RotatingBufferCache] = None,
     ) -> torch.Tensor:
         h = self.forward_partial(input_ids, seqlens, cache=cache)
@@ -299,7 +299,7 @@ class Transformer(nn.Module):
             )
         else:
             assert self.output is not None
-            outs = self.output(h)
+            outs = self.output(h) # Apply the output linear projection of the embeddings to the vocabulary size
         if self.num_pipeline_ranks > 1:
             torch.distributed.broadcast(outs, src=self.num_pipeline_ranks - 1)
         return outs.float()

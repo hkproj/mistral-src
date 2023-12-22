@@ -72,10 +72,10 @@ def generate(prompts: List[str], model: Transformer, tokenizer: Tokenizer, *, ma
 
     # Encode prompt by chunks
     for s in range(0, max_prompt_len, chunk_size):
-        prompt_chunks = [p[s:s+chunk_size] for p in encoded_prompts]
+        prompt_chunks = [p[s:s+chunk_size] for p in encoded_prompts] # Extract the tokens belonging to the current chunk
         assert all(len(p) > 0 for p in prompt_chunks)
         prelogits = model.forward(
-            torch.tensor(sum(prompt_chunks, []), device=model.device, dtype=torch.long),
+            torch.tensor(sum(prompt_chunks, []), device=model.device, dtype=torch.long), # Concatenate all the tokens in the current chunk (of all the prompts) in a single tensor
             seqlens=[len(p) for p in prompt_chunks],
             cache=cache
         )

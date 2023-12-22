@@ -24,8 +24,8 @@ class RotatingCacheInputMetadata:
     # if prefill, use block diagonal causal mask
     # else use causal with padded key mask
     prefill: bool
-    mask: AttentionBias
-    seqlens: List[int]
+    mask: AttentionBias # Mask for the attention
+    seqlens: List[int] 
 
 
 def interleave_list(l1: List[torch.Tensor], l2: List[torch.Tensor]):
@@ -33,15 +33,15 @@ def interleave_list(l1: List[torch.Tensor], l2: List[torch.Tensor]):
     return [v for pair in zip(l1, l2) for v in pair]
 
 
-def unrotate(cache: torch.Tensor, seqlen: int) -> torch.Tensor:
-    assert cache.ndim == 3  # (Max_Seq_Len, Num_Heads, Head_Dim)
-    position = seqlen % cache.shape[0]
-    if seqlen < cache.shape[0]:
+def unrotate(cache: torch.Tensor, seqlen: int) -> torch.Tensor: # seqlen is the total number of tokens cached so far, including the overwritten one. This is needed to calculate the rotation point of the cache
+    assert cache.ndim == 3  # (Sliding_Window_Size, Num_Heads, Head_Dim)
+    position = seqlen % cache.shape[0] # This is the pivot point around which we need to rotate the cache
+    if seqlen < cache.shape[0]: # If the total sequence length so far is smaller than the cache size, then just return the first seqlen elements, as the cache didn't have any rotations yet
         return cache[:seqlen]
     elif position == 0:
         return cache
     else:
-        return torch.cat([cache[position:], cache[:position]], dim=0)
+        return torch.cat([cache[position:], cache[:position]], dim=0) # Select the unrotated elements from the cache around the pivot point
 
 
 class CacheView:
@@ -56,9 +56,9 @@ class CacheView:
         to_cache_mask masks the last [sliding_window] tokens in each sequence
         """
         n_kv_heads, head_dim = self.cache_k.shape[-2:]
-        flat_cache_k = self.cache_k.view(-1, n_kv_heads, head_dim)
-        flat_cache_v = self.cache_v.view(-1, n_kv_heads, head_dim)
-        
+        flat_cache_k = self.cache_k.view(-1, n_kv_heads, head_dim) # (Max_Batch_Size, Sliding_Window_Size, N_Heads_KV, Head_Dim) --> (Max_Batch_Size * Sliding_Window_Size, N_Heads_KV, Head_Dim)
+        flat_cache_v = self.cache_v.view(-1, n_kv_heads, head_dim) # (Max_Batch_Size, Sliding_Window_Size, N_Heads_KV, Head_Dim) --> (Max_Batch_Size * Sliding_Window_Size, N_Heads_KV, Head_Dim)
+        # Copies from the xk and xv tensors to the cache tensors, based on the cache positions and the items to cache (to_cache_mask)
         flat_cache_k.index_copy_(0, self.metadata.cache_positions, xk[self.metadata.to_cache_mask])
         flat_cache_v.index_copy_(0, self.metadata.cache_positions, xv[self.metadata.to_cache_mask])
 
@@ -73,17 +73,17 @@ class CacheView:
             # No cache to interleave
             return xk, xv
 
-        # Make it a list of [(T, H, D)]
+        # Make it a list of [(Seq, N_Heads_KV, Head_Dim)]
         xk = torch.split(xk, self.metadata.seqlens) # (Seq1+Seq2+Seq3, N_Heads_KV, Head_Dim) --> [(Seq1, N_Heads_KV, Head_Dim), (Seq2, N_Heads_KV, Head_Dim), (Seq3, N_Heads_KV, Head_Dim)]
         xv = torch.split(xv, self.metadata.seqlens) # (Seq1+Seq2+Seq3, N_Heads_KV, Head_Dim) --> [(Seq1, N_Heads_KV, Head_Dim), (Seq2, N_Heads_KV, Head_Dim), (Seq3, N_Heads_KV, Head_Dim)]
         assert len(xk) == len(self.kv_seqlens), f"Batch size is {len(self.kv_seqlens)}, got {len(xk)}"
 
         # Order elements in cache by position by unrotating
-        cache_k = [unrotate(t, s) for t, s in zip(self.cache_k, self.kv_seqlens)]
-        cache_v = [unrotate(t, s) for t, s in zip(self.cache_v, self.kv_seqlens)]
+        cache_k = [unrotate(t, s) for t, s in zip(self.cache_k, self.kv_seqlens)] # Currently cached elements, already unrotated, one for each prompt
+        cache_v = [unrotate(t, s) for t, s in zip(self.cache_v, self.kv_seqlens)] # Currently cached elements, already unrotated, one for each prompt
 
-        interleaved_k = interleave_list(cache_k, xk)
-        interleaved_v = interleave_list(cache_v, xv)
+        interleaved_k = interleave_list(cache_k, xk) # Appends the incoming keys and values to the currently cached elements (one for each prompt)
+        interleaved_v = interleave_list(cache_v, xv) # Appends the incoming keys and values to the currently cached elements (one for each prompt)
 
         return torch.cat(interleaved_k, dim=0), torch.cat(interleaved_v, dim=0)
 
@@ -104,7 +104,7 @@ class CacheView:
         return self.metadata.prefill
 
     @property
-    def mask(self):
+    def mask(self): 
         return self.metadata.mask
 
 
@@ -173,34 +173,34 @@ class RotatingBufferCache:
         if self.kv_seqlens is None:
             self.init_kvseqlens(len(seqlens))
         assert len(seqlens) == len(self.kv_seqlens), f"Batch size is {len(self.kv_seqlens)}, got {len(seqlens)}, did you forget to reset cache?"
-        seqpos = self.kv_seqlens.tolist()
+        seqpos = self.kv_seqlens.tolist() # Indicates the total length seen by the cache so far (including the overwritten elements) for each prompt
 
         assert len(seqlens) > 0, seqlens
-        masks = [ # [True] if the token belongs to the sliding window
+        masks = [ # [True] if the token position belongs to the last `sliding_window` positions of the sequence. It is always True unless the chunk size is bigger than the sliding window
             [x >= seqlen - self.sliding_window for x in range(seqlen)]
-            for seqlen in seqlens
+            for seqlen in seqlens # The sequence length of each input in the batch (so we can understand which token belongs to which prompt)
         ]
-        to_cache_mask = torch.tensor(sum(masks, []), device=self.device, dtype=torch.bool) # Concatenate all the masks
+        to_cache_mask = torch.tensor(sum(masks, []), device=self.device, dtype=torch.bool) # Concatenate all the masks of each prompt in the batch
         cached_elements = torch.tensor([sum(mask) for mask in masks], device=self.device, dtype=torch.long) # Number of elements in the mask == True
         positions = torch.cat([torch.arange(pos, pos + seqlen) for pos, seqlen in zip(seqpos, seqlens)]).to(device=self.device, dtype=torch.long) # The position of each token in the prompt (all concatenated)
         batch_idx = torch.tensor(sum([[i]*seqlen for i, seqlen in enumerate(seqlens)], []), device=self.device, dtype=torch.long) # The index of the batch to which each token (in the concatenated list) belongs to.
-        cache_positions = positions % self.sliding_window + batch_idx * self.sliding_window # For each token indicates its position in the cache (which contains all the concatenated tokens of all the batches)
+        cache_positions = positions % self.sliding_window + batch_idx * self.sliding_window # Where each token should be placed in the cache (based on the position in the prompt and the batch index)
 
         first_prefill = seqpos[0] == 0 # Indicates if it is the first prefill
         subsequent_prefill = any(seqlen > 1 for seqlen in seqlens)
-        if first_prefill: # For first chunk of prompt
+        if first_prefill: # For first chunk of prompt. It creates an attention mask that is causal for each prompt and also local based on the sliding window size
             assert all([pos == 0 for pos in seqpos]), (seqpos)
-            mask = BlockDiagonalCausalMask.from_seqlens(seqlens).make_local_attention(self.sliding_window)
+            mask = BlockDiagonalCausalMask.from_seqlens(seqlens).make_local_attention(self.sliding_window) # https://facebookresearch.github.io/xformers/components/ops.html#xformers.ops.fmha.attn_bias.BlockDiagonalMask + local attention based on the sliding window
         elif subsequent_prefill: # For subsequent chunks of prompt
             mask = BlockDiagonalMask.from_seqlens(
-                q_seqlen=seqlens,
-                kv_seqlen=[s + cached_s.clamp(max=self.sliding_window).item() for (s, cached_s) in zip(seqlens, self.kv_seqlens)]
+                q_seqlen=seqlens, # Size of the query
+                kv_seqlen=[s + cached_s.clamp(max=self.sliding_window).item() for (s, cached_s) in zip(seqlens, self.kv_seqlens)] # The total number of keys and values will be the incoming sequence length + the cached elements 
             ).make_local_attention_from_bottomright(self.sliding_window)
         else: # For token generation
             mask = BlockDiagonalCausalWithOffsetPaddedKeysMask.from_seqlens(
-                q_seqlen=seqlens,
+                q_seqlen=seqlens, # Size of the query
                 kv_padding=self.sliding_window,
-                kv_seqlen=(self.kv_seqlens + cached_elements).clamp(max=self.sliding_window).tolist()
+                kv_seqlen=(self.kv_seqlens + cached_elements).clamp(max=self.sliding_window).tolist() # The total number of keys and values will be the incoming sequence length + the cached elements 
             )
 
         return RotatingCacheInputMetadata(
