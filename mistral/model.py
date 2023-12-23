@@ -253,6 +253,7 @@ class Transformer(nn.Module):
         if cache is not None:
             input_metadata = cache.get_input_metadata(seqlens)
         else:
+            # If we do not use the cache, then just return the positions of the tokens to be used for RoPE
             input_metadata = SimpleInputMetadata.from_seqlens(seqlens, self.device)
 
         if self.pipeline_rank == 0:

@@ -176,22 +176,42 @@ class RotatingBufferCache:
         seqpos = self.kv_seqlens.tolist() # Indicates the total length seen by the cache so far (including the overwritten elements) for each prompt
 
         assert len(seqlens) > 0, seqlens
-        masks = [ # [True] if the token position belongs to the last `sliding_window` positions of the sequence. It is always True unless the chunk size is bigger than the sliding window
+
+        # [True] if the token position belongs to the last `sliding_window` positions of the sequence. It is always True unless the chunk size is bigger than the sliding window
+        # Indicates which items in the sequence should be cached (the last `sliding_window` tokens of each sequence)
+        masks = [ 
             [x >= seqlen - self.sliding_window for x in range(seqlen)]
             for seqlen in seqlens # The sequence length of each input in the batch (so we can understand which token belongs to which prompt)
         ]
-        to_cache_mask = torch.tensor(sum(masks, []), device=self.device, dtype=torch.bool) # Concatenate all the masks of each prompt in the batch
-        cached_elements = torch.tensor([sum(mask) for mask in masks], device=self.device, dtype=torch.long) # Number of elements in the mask == True
-        positions = torch.cat([torch.arange(pos, pos + seqlen) for pos, seqlen in zip(seqpos, seqlens)]).to(device=self.device, dtype=torch.long) # The position of each token in the prompt (all concatenated)
-        batch_idx = torch.tensor(sum([[i]*seqlen for i, seqlen in enumerate(seqlens)], []), device=self.device, dtype=torch.long) # The index of the batch to which each token (in the concatenated list) belongs to.
-        cache_positions = positions % self.sliding_window + batch_idx * self.sliding_window # Where each token should be placed in the cache (based on the position in the prompt and the batch index)
 
-        first_prefill = seqpos[0] == 0 # Indicates if it is the first prefill
+        # Indicates which items in the sequence should be cached (the last `sliding_window` tokens of each sequence)
+        # Concatenate all the masks of each prompt in the batch
+        to_cache_mask = torch.tensor(sum(masks, []), device=self.device, dtype=torch.bool) 
+
+        # Number of elements in the mask == True
+        cached_elements = torch.tensor([sum(mask) for mask in masks], device=self.device, dtype=torch.long)
+
+        # The position of each token in the prompt (all concatenated). It may not start from zero (because for example the first chunk may be 5 tokens and we are now processing the second chunk)
+        positions = torch.cat([torch.arange(pos, pos + seqlen) for pos, seqlen in zip(seqpos, seqlens)]).to(device=self.device, dtype=torch.long) 
+
+        # The index of the batch to which each token (in the concatenated list) belongs to.
+        batch_idx = torch.tensor(sum([[i]*seqlen for i, seqlen in enumerate(seqlens)], []), device=self.device, dtype=torch.long) 
+        
+        # Where each token should be placed in the cache (based on the position in the prompt and the batch index)
+        cache_positions = positions % self.sliding_window + batch_idx * self.sliding_window 
+
+        # Indicates if it is the first prefill (only True on the first chunk)
+        first_prefill = seqpos[0] == 0
+        # Indicates if it is a subsequent prefill (True from second chunk onwards), but False when generating tokens.
         subsequent_prefill = any(seqlen > 1 for seqlen in seqlens)
-        if first_prefill: # For first chunk of prompt. It creates an attention mask that is causal for each prompt and also local based on the sliding window size
+
+        if first_prefill: 
+            # For first chunk of prompt. It creates an attention mask that is causal for each prompt and also local based on the sliding window size
+            # https://facebookresearch.github.io/xformers/components/ops.html#xformers.ops.fmha.attn_bias.BlockDiagonalMask + local attention based on the sliding window
             assert all([pos == 0 for pos in seqpos]), (seqpos)
-            mask = BlockDiagonalCausalMask.from_seqlens(seqlens).make_local_attention(self.sliding_window) # https://facebookresearch.github.io/xformers/components/ops.html#xformers.ops.fmha.attn_bias.BlockDiagonalMask + local attention based on the sliding window
-        elif subsequent_prefill: # For subsequent chunks of prompt
+            mask = BlockDiagonalCausalMask.from_seqlens(seqlens).make_local_attention(self.sliding_window) 
+        elif subsequent_prefill:
+            # For subsequent chunks of prompt
             mask = BlockDiagonalMask.from_seqlens(
                 q_seqlen=seqlens, # Size of the query
                 kv_seqlen=[s + cached_s.clamp(max=self.sliding_window).item() for (s, cached_s) in zip(seqlens, self.kv_seqlens)] # The total number of keys and values will be the incoming sequence length + the cached elements 
