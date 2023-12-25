@@ -1,3 +1,7 @@
+# Notes
+
+Source code of the mistral model with my personal comments to make it easier for everyone to understand the code.
+
 # Mistral Transformer
 
 This repository contains minimal code to run our 7B model.
