@@ -164,3 +164,5 @@ mistral-7B-v0.1/
 mistral-7B-v0.1.tar
 
 mixtral-8x7b-32kseqlen/
+
+.vscode/
