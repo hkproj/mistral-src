@@ -251,26 +251,31 @@ class Transformer(nn.Module):
         (num_toks,) = input_ids.shape
         assert sum(seqlens) == num_toks, (sum(seqlens), num_toks)
         if cache is not None:
+            # Generate the attention mask based on the current stage: first pre-fill, subsequent pre-fill or token generation.
             input_metadata = cache.get_input_metadata(seqlens)
         else:
             # If we do not use the cache, then just return the positions of the tokens to be used for RoPE
             input_metadata = SimpleInputMetadata.from_seqlens(seqlens, self.device)
 
         if self.pipeline_rank == 0:
+            # Only the first GPU will take care of the embeddings
             assert self.tok_embeddings is not None
             h = self.tok_embeddings(input_ids) # Transform the tokens into embeddings
         else:
             h = torch.empty(
                 num_toks, self.args.dim, device=self.device, dtype=self.dtype
             )
+            # Subsequent GPUs will receive the embeddings from the previous GPU
             torch.distributed.recv(h, src=self.pipeline_rank - 1)
 
         freqs_cis = self.freqs_cis[input_metadata.positions]
 
+        # Apply each layer iteratively
         for local_layer_id, layer in enumerate(self.layers.values()):
             if cache is not None:
                 assert input_metadata is not None
-                cache_view = cache.get_view(local_layer_id, input_metadata) # Retrieves the KV cache for the current layer
+                # Retrieves the KV cache for the current layer
+                cache_view = cache.get_view(local_layer_id, input_metadata) 
             else:
                 cache_view = None
             h = layer(h, freqs_cis, cache_view)
@@ -278,6 +283,7 @@ class Transformer(nn.Module):
         if cache is not None:
             cache.update_seqlens(seqlens) # Updates the total sequence length so far seen by the cache among all the iterations
         if self.pipeline_rank < self.num_pipeline_ranks - 1:
+            # After all the layers for the current GPU have been applied, send the output to the next GPU
             torch.distributed.send(h, dst=self.pipeline_rank + 1)
             return h
         else:
