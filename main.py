@@ -154,14 +154,13 @@ def demo(
     res, _logprobs = generate(
         [
             "This is a test made by me with the help of an AI assistant. I also like to play with videogames. Can you recommend me one game to play with?",
-            # "This is another great test",
-            # "This is a third test, mistral AI is very good at testing. ",
+            "This is another great test",
+            "This is a third test, mistral AI is very good at testing. ",
         ],
         transformer,
         tokenizer,
         max_tokens=max_tokens,
-        temperature=temperature,
-        chunk_size=10,
+        temperature=temperature
     )
     if should_print:
         for x,l in zip(res, _logprobs):
