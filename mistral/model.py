@@ -50,8 +50,10 @@ class SimpleInputMetadata:
             )
         )
 
-# repeat_intrleave repeats the given dimension like this: x = torch.tensor([1, 2, 3]) --> torch.repeat_interleave(x, repeats=2, dim=0) --> torch.tensor([1, 1, 2, 2, 3, 3])
+
 def repeat_kv(keys: torch.Tensor, values: torch.Tensor, repeats: int, dim: int):
+    # repeat_intrleave repeats the given dimension like this: x = torch.tensor([1, 2, 3]) --> torch.repeat_interleave(x, repeats=2, dim=0) --> torch.tensor([1, 1, 2, 2, 3, 3])
+    # This is used to repeat the keys and values to match the number of query heads (Grouped Query Attention).
     keys = torch.repeat_interleave(keys, repeats=repeats, dim=dim) # (Seq, N_Heads_KV, Head_Dim) --> (Seq, N_Heads, Head_Dim)
     values = torch.repeat_interleave(values, repeats=repeats, dim=dim) # (Seq, N_Heads_KV, Head_Dim) --> (Seq, N_Heads, Head_Dim)
     return keys, values
